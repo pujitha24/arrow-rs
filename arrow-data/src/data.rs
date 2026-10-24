@@ -1533,11 +1533,18 @@ impl ArrayData {
                 let child = &self.child_data[0];
                 if !field.is_nullable() {
                     let element_len = *len as usize;
-                    let child_nulls = child.nulls().map(|nulls| {
-                        nulls.slice(self.offset * element_len, self.len * element_len)
-                    });
-                    let expanded = self.nulls.as_ref().map(|nulls| nulls.expand(element_len));
-                    self.validate_non_nullable(expanded.as_ref(), child, child_nulls.as_ref())?;
+                    // Only expand the parent nulls if the child has nulls to check against
+                    let child_nulls =
+                        child
+                            .nulls()
+                            .filter(|nulls| nulls.null_count() != 0)
+                            .map(|nulls| {
+                                nulls.slice(self.offset * element_len, self.len * element_len)
+                            });
+                    if child_nulls.is_some() {
+                        let expanded = self.nulls.as_ref().map(|nulls| nulls.expand(element_len));
+                        self.validate_non_nullable(expanded.as_ref(), child, child_nulls.as_ref())?;
+                    }
                 }
             }
             DataType::Struct(fields) => {
@@ -2665,6 +2672,24 @@ mod tests {
             assert!(build(vec![false, true]).is_ok());
             assert!(build(vec![true, false]).is_err());
         }
+    }
+
+    #[test]
+    fn test_fixed_size_list_non_nullable_child_without_nulls_skips_expansion() {
+        // Expanding these parent nulls would require ~250GB, but the child has no nulls
+        let size = i32::MAX;
+        let len = 1000;
+        let child = ArrayData::new_null(&DataType::Null, len * size as usize);
+        let data = ArrayData::builder(DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Null, false)),
+            size,
+        ))
+        .len(len)
+        .nulls(Some(NullBuffer::from_iter((0..len).map(|i| i != 0))))
+        .add_child_data(child)
+        .build()
+        .unwrap();
+        data.validate_nulls().unwrap();
     }
 
     #[test]
